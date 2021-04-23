@@ -5,13 +5,13 @@ import fetch from 'node-fetch';
 import { PNG } from 'pngjs';
 import * as utils from './utils';
 import * as telegramUtils from './utils/telegram';
-import * as database from './database';
+import * as databaseM from './database';
 
 const config = require('../config.json');
 const registry = require('../emote-registry.json');
 
 let agent = new https.Agent({ keepAlive: true });
-let db = new database.Database();
+let db = new databaseM.Database();
 
 interface EmoteRegistry {
   version: 1;
@@ -66,10 +66,11 @@ bot.on(
       if (matchedEmotes.length >= limit) break;
       if (!emote.safe) continue;
       if (!(queryRegex.test(emote.name) || queryRegex.test(emote.guild_name))) continue;
-      let fileId = await db.getOptional(`emote_uploaded_file_id:${emote.id}`);
+      let fileId = await db.getOptional(`emote_uploaded_file_id:${emote.id}`, { asBuffer: false });
       if (fileId == null) continue;
+      fileId = databaseM.ensureString(fileId);
       if (matchCounter >= offset) {
-        matchedEmotes.push({ emote, fileId: fileId.toString() });
+        matchedEmotes.push({ emote, fileId: fileId });
       }
       matchCounter++;
     }
@@ -121,17 +122,29 @@ async function main(): Promise<void> {
     if (!(await db.has(`emote_uploaded_file_id:${emote.id}`))) {
       console.log('downloading', emote.ref);
 
-      let response = await fetch(emote.url, { agent });
-      if (!response.ok) {
-        throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+      let cachedData = await db.getOptional(`download:${emote.url}:data`, { asBuffer: true });
+      let cachedFileType = await db.getOptional(`download:${emote.url}:file_type`, {
+        asBuffer: false,
+      });
+      if (cachedData != null && cachedFileType != null) {
+        cachedData = databaseM.ensureBuffer(cachedData);
+        cachedFileType = databaseM.ensureString(cachedFileType);
+      } else {
+        let response = await fetch(emote.url, { agent });
+        if (!response.ok) {
+          throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+        }
+        cachedData = await response.buffer();
+        cachedFileType = response.headers.get('content-type') ?? 'application/octet-stream';
+        await db.set(`download:${emote.url}:data`, cachedData);
+        await db.set(`download:${emote.url}:file_type`, cachedFileType);
       }
-      let downloadedImage = await response.buffer();
-      let imageContentType = response.headers.get('content-type') ?? 'application/octet-stream';
 
       console.log('transforming', emote.ref);
-      switch (imageContentType) {
+      let transformedImage = cachedData;
+      switch (cachedFileType) {
         case 'image/png': {
-          let pngImage = PNG.sync.read(downloadedImage);
+          let pngImage = PNG.sync.read(transformedImage);
           let sw = pngImage.width;
           let sh = pngImage.height;
           let spixels = pngImage.data;
@@ -186,7 +199,7 @@ async function main(): Promise<void> {
             }
           }
 
-          downloadedImage = PNG.sync.write(pngImage2);
+          transformedImage = PNG.sync.write(pngImage2);
           break;
         }
 
@@ -198,13 +211,13 @@ async function main(): Promise<void> {
         }
 
         default: {
-          throw new Error(`Unknown emote file type: ${imageContentType}`);
+          throw new Error(`Unknown emote file type: ${cachedFileType}`);
         }
       }
 
       console.log('uploading', emote.ref);
       let sendChatId = config.cdnChatId;
-      let sendInputFile: tt.InputFile = { source: downloadedImage };
+      let sendInputFile: tt.InputFile = { source: transformedImage };
       let sendExtra = { caption: emote.id };
       let fileId: string;
       if (emote.animated) {

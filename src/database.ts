@@ -37,3 +37,11 @@ export class Database {
     return await this.inner.put(key, value, options);
   }
 }
+
+export function ensureBuffer(bytes: Bytes): Buffer {
+  return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+}
+
+export function ensureString(bytes: Bytes): string {
+  return Buffer.isBuffer(bytes) ? bytes.toString('utf8') : bytes;
+}
