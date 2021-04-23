@@ -1,4 +1,5 @@
 build/
 node_modules/
+/data/
 /config.json
 /emote-registry.json
