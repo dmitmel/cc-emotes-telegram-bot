@@ -49,12 +49,31 @@ function escapeRegExp(str: string): string {
 bot.on(
   'inline_query',
   async (ctx: TelegrafContext, next: () => Promise<void>): Promise<void> => {
-    let queryRegex = new RegExp(escapeRegExp(ctx.inlineQuery!.query), 'i');
-    let matchedEmotes: Array<EmoteRegistryEntry> = registryV1.list
-      .filter((emote) => queryRegex.test(emote.name) || queryRegex.test(emote.guild_name))
-      .slice(0, 50);
+    let inlineQuery = ctx.inlineQuery!;
+    let page = parseInt(inlineQuery.offset, INLINE_QUERY_PAGE_NUMBER_BASE);
+    if (Number.isNaN(page)) page = 0;
+    let offset = page * INLINE_QUERY_PAGE_SIZE;
+    let limit = INLINE_QUERY_PAGE_SIZE;
 
-    let result: tt.InlineQueryResult[] = matchedEmotes.map((emote) => {
+    let matchedEmotes: Array<EmoteRegistryEntry> = [];
+    let queryRegex = new RegExp(escapeRegExp(inlineQuery.query), 'i');
+    let matchCounter = 0;
+    for (let emote of registryV1.list) {
+      if (matchedEmotes.length >= limit) break;
+      if (!emote.safe) continue;
+      if (!(queryRegex.test(emote.name) || queryRegex.test(emote.guild_name))) continue;
+      if (matchCounter >= offset) {
+        matchedEmotes.push(emote);
+      }
+      matchCounter++;
+    }
+
+    let queryDebugStr = JSON.stringify(inlineQuery.query);
+    console.log(
+      `search:${queryDebugStr} offset:${offset} limit:${limit} results:${matchedEmotes.length}`,
+    );
+
+    let results: tt.InlineQueryResult[] = matchedEmotes.map((emote) => {
       let id = `emote:${emote.id}`;
       let caption = emote.name;
       if (emote.animated) {
@@ -88,9 +107,10 @@ bot.on(
       }
     });
 
-    await ctx.answerInlineQuery(result, {
+    await ctx.answerInlineQuery(results, {
       cache_time: 0,
       is_personal: false,
+      next_offset: (page + 1).toString(INLINE_QUERY_PAGE_NUMBER_BASE),
     });
     return next();
   },
