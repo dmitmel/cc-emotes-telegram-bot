@@ -2,10 +2,10 @@ import { Telegraf, Context as TelegrafContext } from 'telegraf';
 import type * as tt from 'telegraf/src/core/types/typegram';
 import * as https from 'https';
 import fetch from 'node-fetch';
-import { PNG } from 'pngjs';
 import * as utils from './utils';
 import * as telegramUtils from './utils/telegram';
 import * as databaseM from './database';
+import * as subprocess from 'child_process';
 
 const config = require('../config.json');
 const registry = require('../emote-registry.json');
@@ -140,84 +140,70 @@ async function main(): Promise<void> {
         await db.set(`download:${emote.url}:file_type`, cachedFileType);
       }
 
-      console.log('transforming', emote.ref);
-      let transformedImage = cachedData;
-      switch (cachedFileType) {
-        case 'image/png': {
-          let pngImage = PNG.sync.read(transformedImage);
-          let sw = pngImage.width;
-          let sh = pngImage.height;
-          let spixels = pngImage.data;
+      const IMAGEMAGICK_FORMAT_MAPPING = new Map<string, string>([
+        ['image/png', 'png'],
+        ['image/gif', 'gif'],
+      ]);
 
-          // premultiply alpha
-          for (let i = 0, len = sw * sh * 4; i < len; i += 4) {
-            let a = spixels[i + 3];
-            spixels[i + 0] = (spixels[i + 0] * a) / 0xff;
-            spixels[i + 1] = (spixels[i + 1] * a) / 0xff;
-            spixels[i + 2] = (spixels[i + 2] * a) / 0xff;
-            spixels[i + 3] = 0xff;
-          }
-
-          let dstSize = 128;
-          let dstBorder = 16;
-          let srcSize = 0;
-          let srcOffX = 0;
-          let srcOffY = 0;
-          if (sw >= sh) {
-            srcSize = sw;
-            srcOffY += Math.floor((sw - sh) / 2);
-          } else {
-            srcSize = sh;
-            srcOffX += Math.floor((sh - sw) / 2);
-          }
-
-          // JS shaders basically
-          let pngImage2 = new PNG({
-            width: dstSize + dstBorder * 2,
-            height: dstSize + dstBorder * 2,
-          });
-          let dw = pngImage2.width;
-          let dh = pngImage2.height;
-          let pixels2 = pngImage2.data;
-          for (let dy = 0; dy < dh; dy++) {
-            for (let dx = 0; dx < dw; dx++) {
-              let di = (dx + dy * dw) * 4;
-              let sx = Math.floor(((dx - dstBorder) * srcSize) / dstSize) - srcOffX;
-              let sy = Math.floor(((dy - dstBorder) * srcSize) / dstSize) - srcOffY;
-              if (sx >= 0 && sy >= 0 && sx < sw && sy < sh) {
-                let si = (sx + sy * sw) * 4;
-                pixels2[di + 0] = spixels[si + 0];
-                pixels2[di + 1] = spixels[si + 1];
-                pixels2[di + 2] = spixels[si + 2];
-                pixels2[di + 3] = spixels[si + 3];
-              } else {
-                pixels2[di + 0] = 0x00;
-                pixels2[di + 1] = 0x00;
-                pixels2[di + 2] = 0x00;
-                pixels2[di + 3] = 0xff;
-              }
-            }
-          }
-
-          transformedImage = PNG.sync.write(pngImage2);
-          break;
-        }
-
-        case 'image/gif': {
-          // TODO
-          // <https://github.com/pkrumins/node-gif>
-          // <https://github.com/benwiley4000/gif-frames>
-          break;
-        }
-
-        default: {
-          throw new Error(`Unknown emote file type: ${cachedFileType}`);
-        }
+      console.log('processing', emote.ref);
+      let imagemagickFormat = IMAGEMAGICK_FORMAT_MAPPING.get(cachedFileType);
+      if (imagemagickFormat == null) {
+        throw new Error(`Unknown emote file type: ${cachedFileType}`);
       }
+
+      // Apparently calling out to an ImageMagick subprocess is a viable method
+      // of image processing in JS.
+      let program = 'convert';
+      let args: string[] = [];
+      // read from stdin
+      args.push(`${imagemagickFormat}:-`);
+      // replace the background with black color
+      // <https://legacy.imagemagick.org/Usage/anim_mods/#remove_trans>
+      args.push('-coalesce', '-background', 'black');
+      // resize and fit into a 128x128 px square
+      args.push('-gravity', 'Center', '-resize', '128x128', '-extent', '128x128');
+      // add a 16px black border
+      args.push('-bordercolor', 'black', '-border', '16');
+      // <https://legacy.imagemagick.org/Usage/anim_basics/#types>
+      // <https://legacy.imagemagick.org/Usage/anim_basics/#overlay>
+      // <https://legacy.imagemagick.org/Usage/anim_opt/>
+      args.push('-layers', 'Optimize');
+      // write to stdout
+      args.push(`${imagemagickFormat}:-`);
+
+      // Again, the stupid insanely-hard-to-use stream APIs... I hope I did
+      // everything correctly here. Also, spawnSync can't be used for
+      // simplification because it is limited by a fixed buffer size, and if
+      // the size of subprocess'es output exceeds this buffer size, the whole
+      // operation fails with an exception. On the other hand, the async
+      // variant of spawn allows for unbounded input and output.
+      let processedImage: Buffer = await new Promise((resolve, reject) => {
+        let proc = subprocess.spawn(program, args, {
+          stdio: [/* stdin */ 'pipe', /* stdout */ 'pipe', /* stderr */ 'inherit'],
+        });
+        proc.on('error', (err: Error) => {
+          reject(err);
+        });
+        let chunks: Buffer[] = [];
+        proc.stdout.on('data', (data: Buffer) => {
+          chunks.push(data);
+        });
+        proc.stdout.on('error', (err: Error) => {
+          reject(err);
+        });
+        proc.on('close', (code: number | null) => {
+          if (code !== 0) {
+            reject(new Error(`Command failed with a non-zero exit code: ${code}`));
+          } else {
+            resolve(Buffer.concat(chunks));
+          }
+        });
+        proc.stdin.end(cachedData);
+      });
 
       console.log('uploading', emote.ref);
       let sendChatId = config.cdnChatId;
-      let sendInputFile: tt.InputFile = { source: transformedImage };
+      let sendInputFile: tt.InputFile = { source: processedImage };
       let sendExtra = { caption: emote.id };
       let fileId: string;
       if (emote.animated) {

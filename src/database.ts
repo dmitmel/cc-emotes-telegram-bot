@@ -1,5 +1,10 @@
 import * as pathlib from 'path';
-import leveldown, { Bytes, LevelDownGetOptions, LevelDownPutOptions } from 'leveldown';
+import leveldown, {
+  Bytes,
+  LevelDownGetOptions,
+  LevelDownPutOptions,
+  LevelDownDelOptions,
+} from 'leveldown';
 import levelup from 'levelup';
 const LevelupNotFoundError = (levelup.errors.NotFoundError as unknown) as typeof Error;
 
@@ -35,6 +40,10 @@ export class Database {
 
   public async set(key: Bytes, value: Bytes, options?: LevelDownPutOptions): Promise<void> {
     return await this.inner.put(key, value, options);
+  }
+
+  public async delete(key: Bytes, options?: LevelDownDelOptions): Promise<void> {
+    return await this.inner.del(key, options);
   }
 }
 
